@@ -1,0 +1,7 @@
+[general]
+name=InterseccionesOSM
+description=Genera shapefiles de intersecciones OSM para una ciudad fija
+version=1.0
+qgisMinimumVersion=3.0
+author=DESIVA
+email=vidasyartes@gmail.com
