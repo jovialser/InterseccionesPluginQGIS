@@ -1,15 +1,3 @@
-InterseccionesPlugin/
-├── __init__.py
-├── InterseccionesPlugin.py
-├── InterseccionesPluginDialog.py
-├── resources.qrc
-├── recursos/
-│   └── localidades_censales.csv
-├── ui/
-│   └── InterseccionesPlugin.ui
-├── metadata.txt
-└── README.md
-
 # 🧭 InterseccionesPlugin
 
 **InterseccionesPlugin** es un complemento para QGIS que permite generar análisis espacial de intersecciones viales en localidades de Argentina, utilizando datos de OpenStreetMap y CSVs de incidentes geolocalizados.
