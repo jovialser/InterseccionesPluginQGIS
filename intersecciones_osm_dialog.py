@@ -5,7 +5,6 @@ from shapely.ops import voronoi_diagram
 import os
 import pandas as pd
 from qgis.utils import iface
-
 from qgis.PyQt import uic
 from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtWidgets import QDialog, QFileDialog
@@ -17,8 +16,7 @@ from qgis.core import (
     QgsSimpleFillSymbolLayer,
     QgsSingleSymbolRenderer,
     QgsRuleBasedRenderer,  
-    QgsMarkerSymbol,
-    QgsField
+    QgsMarkerSymbol
 )
 from PyQt5.QtCore import QVariant
 from PyQt5.QtGui import QColor
@@ -67,12 +65,10 @@ class InterseccionesPluginDialog(QDialog, FORM_CLASS):
         except Exception as e:
             self.labelZonaUTM.setText("Zona UTM: ❌ Error")
             return None
-
     def seleccionar_ruta(self):
         carpeta = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
         if carpeta:
-            self.lineEditRuta.setText(carpeta)
-    
+            self.lineEditRuta.setText(carpeta)    
     def abrir_csv(self):
         ruta_csv, _ = QFileDialog.getOpenFileName(self, "Seleccionar archivo CSV", "", "CSV (*.csv)")
         if ruta_csv:
@@ -117,11 +113,9 @@ class InterseccionesPluginDialog(QDialog, FORM_CLASS):
         nombre_provincia = self.comboBoxProvincia.currentText()
         ciudad = f"{nombre_localidad}, {nombre_provincia}, Argentina"
         epsg_utm = self.detectar_zona_utm(ciudad)
-
         if epsg_utm is None:
             self.labelEstado.setText("❌ No se pudo determinar la zona UTM.")
             return
-
         try:
             G = ox.graph_from_place(ciudad, network_type='drive')
             nodes, edges = ox.graph_to_gdfs(G)
@@ -130,10 +124,8 @@ class InterseccionesPluginDialog(QDialog, FORM_CLASS):
             gdf = gpd.GeoDataFrame(intersec, geometry='geometry', crs='EPSG:4326')
             gdf_utm = gdf.to_crs(epsg=epsg_utm)
             gdf_ciudad = ox.geocode_to_gdf(ciudad).to_crs(epsg=epsg_utm)
-
             buffers = gdf_utm.buffer(20)
             union = buffers.unary_union
-
             if union.geom_type == 'Polygon':
                 centroides = [union.centroid]
             elif union.geom_type == 'MultiPolygon':
@@ -141,56 +133,65 @@ class InterseccionesPluginDialog(QDialog, FORM_CLASS):
             else:
                 self.labelEstado.setText("⚠️ No se pudo generar geometrías fusionadas.")
                 return
-
             gdf_utm_fusionados = gpd.GeoDataFrame(geometry=centroides, crs=gdf_utm.crs)
-
+                # Puntos medios de calles (solo si longitud > 70m)
+            edges_utm = edges.to_crs(epsg=epsg_utm)
+            edges_filtradas = edges_utm[edges_utm.geometry.length > 70].copy()
+            edges_filtradas['midpoint'] = edges_filtradas.geometry.apply(lambda line: line.interpolate(0.5, normalized=True))
+            gdf_midpoints = gpd.GeoDataFrame(geometry=edges_filtradas['midpoint'], crs=edges_utm.crs)
+            #-----
+            # Crear buffers de 20 metros alrededor de los puntos medios
+            buffers_midpoints = gdf_midpoints.buffer(20)
+            # Unir los buffers en una sola geometría
+            union_midpoints = buffers_midpoints.unary_union
+            # Calcular centroides de la geometría fusionada
+            if union_midpoints.geom_type == 'Polygon':
+                centroides_midpoints = [union_midpoints.centroid]
+            elif union_midpoints.geom_type == 'MultiPolygon':
+                centroides_midpoints = [geom.centroid for geom in union_midpoints.geoms if geom.area > 0]
+            else:
+                self.labelEstado.setText("⚠️ No se pudo generar geometrías fusionadas de puntos medios.")
+                return
+            # Crear GeoDataFrame con los centroides de puntos medios
+            gdf_centroides_midpoints = gpd.GeoDataFrame(geometry=centroides_midpoints, crs=gdf_midpoints.crs)
+            #----
             if len(gdf_utm_fusionados) < 3:
                 self.labelEstado.setText("⚠️ No hay suficientes puntos para generar Voronoi.")
                 return
-
-            gdf_voronoi = self.generar_voronoi(gdf_utm_fusionados, gdf_ciudad)
-
+            #
+            # Combinar centroides de intersecciones y puntos medios
+            gdf_centroides_combinados_para_voronoi = gpd.GeoDataFrame(
+                pd.concat([gdf_utm_fusionados, gdf_centroides_midpoints], ignore_index=True),
+                crs=gdf_utm_fusionados.crs
+            )
+            # Generar Voronoi con todos los centroides combinados
+            gdf_voronoi = self.generar_voronoi(gdf_centroides_combinados_para_voronoi, gdf_ciudad)
+            #
             ruta_csv = self.lineEditRutaCSV.text().strip()
             df_csv = pd.read_csv(ruta_csv)
-
             if 'latitud' not in df_csv.columns or 'longitud' not in df_csv.columns:
                 self.labelEstado.setText("❌ El CSV no contiene columnas 'latitud' y 'longitud'.")
                 return
-
             df_csv['geometry'] = df_csv.apply(lambda row: Point(row['longitud'], row['latitud']), axis=1)
             gdf_csv = gpd.GeoDataFrame(df_csv, geometry='geometry', crs='EPSG:4326').to_crs(epsg=epsg_utm)
-
-
             gdf_voronoi['voronoi_id'] = range(len(gdf_voronoi))
             gdf_join = gpd.sjoin(gdf_csv, gdf_voronoi, how='left', predicate='intersects')
-
             conteo_categorico = (
                 gdf_join.groupby(['voronoi_id', 'id'])
                 .size()
                 .unstack(fill_value=0)
                 .reset_index()
             )
-
-
             columnas_renombradas = {
                 'atropello de peatones': 'atropello',
                 'colisión entre vehículos': 'colision',
                 'vuelco': 'vuelco'
             }
             conteo_categorico.rename(columns=columnas_renombradas, inplace=True)
-
-
             conteo_categorico['total_inci'] = conteo_categorico[list(columnas_renombradas.values())].sum(axis=1)
-
-
             gdf_voronoi = gdf_voronoi.merge(conteo_categorico, on='voronoi_id', how='left')
-
-
             for col in list(columnas_renombradas.values()) + ['total_inci']:
                 gdf_voronoi[col] = gdf_voronoi[col].fillna(0).astype(int)
-
-
-
             gdf_utm_fusionados['centroide_id'] = range(len(gdf_utm_fusionados))
             gdf_utm_fusionados = gpd.sjoin(
                 gdf_utm_fusionados,
@@ -198,17 +199,12 @@ class InterseccionesPluginDialog(QDialog, FORM_CLASS):
                 how='left',
                 predicate='intersects'
             )
-
             for col in list(columnas_renombradas.values()) + ['total_inci']:
                 gdf_utm_fusionados[col] = gdf_utm_fusionados[col].fillna(0).astype(int)
-
-
-
             gdf_voronoi = gpd.sjoin(gdf_voronoi, gdf_utm, how='left', predicate='intersects')
             gdf_final = gdf_voronoi.to_crs(epsg=4326)
             nombre = ciudad.replace(",", "").replace(" ", "_")
             carpeta = self.lineEditRuta.text().strip()
-
             if not carpeta:
                 self.labelEstado.setText("❌ Por favor seleccioná una carpeta de salida.")
                 return
@@ -218,56 +214,62 @@ class InterseccionesPluginDialog(QDialog, FORM_CLASS):
             if not os.access(carpeta, os.W_OK):
                 self.labelEstado.setText("🚫 No tenés permisos de escritura en esa carpeta.")
                 return
-
             ruta_voronoi = os.path.join(carpeta, f"voronoi_intersecciones_{nombre}.shp")
             ruta_puntos = os.path.join(carpeta, f"intersecciones_{nombre}.shp")
             ruta_centroides = os.path.join(carpeta, f"centroides_fusionados_{nombre}.shp")
-
+            #
+            # Guardar puntos medios como shapefile
+            ruta_centroides_midpoints = os.path.join(carpeta, f"centroides_puntos_medios_{nombre}.shp")
+            gdf_centroides_midpoints.to_crs(epsg=4326).to_file(ruta_centroides_midpoints)
+            #
             gdf_final.to_file(ruta_voronoi)
             gdf.to_file(ruta_puntos)
-            gdf_utm_fusionados.to_crs(epsg=4326).to_file(ruta_centroides)
-
-
+            #gdf_utm_fusionados.to_crs(epsg=4326).to_file(ruta_centroides)
+            gdf_centroides_midpoints['tipo'] = 'punto_medio'
+            gdf_utm_fusionados['tipo'] = 'centroide'
+            gdf_centroides_combinados = gpd.GeoDataFrame(
+                pd.concat([gdf_utm_fusionados, gdf_centroides_midpoints], ignore_index=True),
+                crs=gdf_utm_fusionados.crs
+            ).to_crs(epsg=4326)
+            gdf_centroides_combinados.to_file(ruta_centroides)
+            #----
             self.agregar_capa_base_osm()
             layer_voronoi = QgsVectorLayer(ruta_voronoi, f"Voronoi - {nombre}", "ogr")
             layer_puntos = QgsVectorLayer(ruta_puntos, f"Intersecciones - {nombre}", "ogr")
             layer_centroides = QgsVectorLayer(ruta_centroides, f"Centroides Fusionados - {nombre}", "ogr")
-
             if layer_puntos.isValid():
                 symbol = layer_puntos.renderer().symbol()
                 symbol.setColor(QColor(0, 100, 255))
                 symbol.setSize(2.5)
                 QgsProject.instance().addMapLayer(layer_puntos)
-
+            #---
+            layer_centroides_midpoints = QgsVectorLayer(ruta_centroides_midpoints, f"Centroides Puntos Medios - {nombre}", "ogr")
+            if layer_centroides_midpoints.isValid():
+                symbol = layer_centroides_midpoints.renderer().symbol()
+                symbol.setColor(QColor(255, 0, 255))  # fucsia
+                symbol.setSize(2.5)
+                QgsProject.instance().addMapLayer(layer_centroides_midpoints)
+            #---
             nodo_puntos = QgsProject.instance().layerTreeRoot().findLayer(layer_puntos.id())
             if nodo_puntos:
                 nodo_puntos.setItemVisibilityChecked(False)
             if layer_centroides.isValid():
                 renderer = QgsRuleBasedRenderer(QgsMarkerSymbol.createSimple({}))
                 root_rule = renderer.rootRule()
-            
-
-
                 regla_1 = QgsRuleBasedRenderer.Rule(QgsMarkerSymbol.createSimple({'color': '0,255,0', 'size': '3'}))
                 regla_1.setLabel("Baja o nula siniestralidad")
                 regla_1.setFilterExpression('"total_inci" >= 0 AND "total_inci" <= 1')                
                 root_rule.appendChild(regla_1)
-
-
                 regla_2 = QgsRuleBasedRenderer.Rule(QgsMarkerSymbol.createSimple({'color': '255,255,0', 'size': '3.5'}))
                 regla_2.setLabel("media siniestralidad")
                 regla_2.setFilterExpression('"total_inci" >= 2 AND "total_inci" <= 4')
                 root_rule.appendChild(regla_2)
-
-
                 regla_3 = QgsRuleBasedRenderer.Rule(QgsMarkerSymbol.createSimple({'color': '255,0,0', 'size': '4'}))
                 regla_3.setLabel("Alta siniestralidad")
                 regla_3.setFilterExpression('"total_inci" > 4')
                 root_rule.appendChild(regla_3)
-
                 layer_centroides.setRenderer(renderer)
                 QgsProject.instance().addMapLayer(layer_centroides)
-
             if layer_voronoi.isValid():
                 fill_layer = QgsSimpleFillSymbolLayer()
                 fill_layer.setFillColor(QColor(0, 100, 255, 64))
@@ -277,26 +279,21 @@ class InterseccionesPluginDialog(QDialog, FORM_CLASS):
                 symbol.changeSymbolLayer(0, fill_layer)
                 layer_voronoi.setRenderer(QgsSingleSymbolRenderer(symbol))
                 QgsProject.instance().addMapLayer(layer_voronoi)
-
             nodo_voronoi = QgsProject.instance().layerTreeRoot().findLayer(layer_voronoi.id())
             if nodo_voronoi:
                 nodo_voronoi.setItemVisibilityChecked(False)
                 iface.mapCanvas().setExtent(layer_voronoi.extent())
                 iface.mapCanvas().refresh()
-
             nodo_voronoi = QgsProject.instance().layerTreeRoot().findLayer(layer_voronoi.id())
             if nodo_voronoi:
                 nodo_voronoi.setItemVisibilityChecked(False)
                 iface.mapCanvas().setExtent(layer_voronoi.extent())
                 iface.mapCanvas().refresh()
-
-
             root = QgsProject.instance().layerTreeRoot()
             nodo_base = root.findLayer(self.capa_base_osm.id())
             if nodo_base:
                 root.insertChildNode(5, nodo_base.clone())
                 root.removeChildNode(nodo_base)
-
             self.labelEstado.setText(f"✅ Shapefiles guardados y cargados en QGIS:\n{ruta_voronoi}")
         except Exception as e:
             self.labelEstado.setText(f"❌ Error: {str(e)}")
