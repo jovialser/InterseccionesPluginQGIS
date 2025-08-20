@@ -193,6 +193,7 @@ class InterseccionesPluginDialog(QDialog, FORM_CLASS):
             for col in list(columnas_renombradas.values()) + ['total_inci']:
                 gdf_voronoi[col] = gdf_voronoi[col].fillna(0).astype(int)
             gdf_utm_fusionados['centroide_id'] = range(len(gdf_utm_fusionados))
+            #---
             gdf_utm_fusionados = gpd.sjoin(
                 gdf_utm_fusionados,
                 gdf_voronoi[['voronoi_id'] + list(columnas_renombradas.values()) + ['total_inci', 'geometry']],
@@ -201,6 +202,16 @@ class InterseccionesPluginDialog(QDialog, FORM_CLASS):
             )
             for col in list(columnas_renombradas.values()) + ['total_inci']:
                 gdf_utm_fusionados[col] = gdf_utm_fusionados[col].fillna(0).astype(int)
+            #---
+            gdf_centroides_midpoints = gpd.sjoin(
+                gdf_centroides_midpoints,
+                gdf_voronoi[['voronoi_id'] + list(columnas_renombradas.values()) + ['total_inci', 'geometry']],
+                how='left',
+                predicate='intersects'
+            )
+            for col in list(columnas_renombradas.values()) + ['total_inci']:
+                gdf_centroides_midpoints[col] = gdf_centroides_midpoints[col].fillna(0).astype(int)
+            #------    
             gdf_voronoi = gpd.sjoin(gdf_voronoi, gdf_utm, how='left', predicate='intersects')
             gdf_final = gdf_voronoi.to_crs(epsg=4326)
             nombre = ciudad.replace(",", "").replace(" ", "_")
